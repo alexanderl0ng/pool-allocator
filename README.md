@@ -51,12 +51,12 @@ All objects must be deallocated before the pool itself is destroyed if `T` has a
 -------------------------------------------------------------------------
 Benchmark                               Time             CPU   Iterations
 -------------------------------------------------------------------------
-BM_NewDelete/100                      607 ns          607 ns      1126036
-BM_NewDelete/1000                    5806 ns         5794 ns       118682
-BM_NewDelete/10000                  59208 ns        58811 ns        12164
-BM_PoolAllocator<10'000>/100         50.7 ns         50.7 ns     13784140
-BM_PoolAllocator<10'000>/1000         462 ns          461 ns      1572115
-BM_PoolAllocator<10'000>/10000       4536 ns         4534 ns       154413
+BM_NewDelete/100                     1100 ns         1100 ns       662634
+BM_NewDelete/1000                   10053 ns        10041 ns        70213
+BM_NewDelete/10000                 114097 ns       114016 ns         6231
+BM_PoolAllocator<10'000>/100          118 ns          118 ns      5766633
+BM_PoolAllocator<10'000>/1000        1203 ns         1201 ns       579197
+BM_PoolAllocator<10'000>/10000      12297 ns        12288 ns        56545
 ```
 Benchmarks run on an Apple M4. See `benchmarks/bench.cpp` for details.
 

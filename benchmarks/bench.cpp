@@ -12,7 +12,7 @@ struct Widget {
 static void BM_NewDelete(benchmark::State& state) {
     const std::size_t num_elements = state.range(0);
 
-    std::vector<Widget*> ptrs;
+    std::vector<Widget*> ptrs(num_elements);
     for (auto _ : state) {
         for (std::size_t i{}; i < num_elements; ++i) {
             ptrs[i] = new Widget(1.0, 2, 3);
@@ -29,7 +29,7 @@ static void BM_PoolAllocator(benchmark::State& state) {
     const std::size_t num_elements = state.range(0);
 
     pool::PoolAllocator<Widget, Capacity> p;
-    std::vector<Widget*> ptrs;
+    std::vector<Widget*> ptrs(num_elements);
     for (auto _ : state) {
         for (std::size_t i{}; i < num_elements; ++i) {
             ptrs[i] = p.create(1.0, 2, 3);

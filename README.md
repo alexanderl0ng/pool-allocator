@@ -58,6 +58,7 @@ BM_PoolAllocator<10'000>/100         50.7 ns         50.7 ns     13784140
 BM_PoolAllocator<10'000>/1000         462 ns          461 ns      1572115
 BM_PoolAllocator<10'000>/10000       4536 ns         4534 ns       154413
 ```
+Benchmarks run on an Apple M4. See `benchmarks/bench.cpp` for details.
 
 ## Design
 - **Stack Allocation** - the entire pool lives inline as a fixed-size array, there is no heap allocation. Capacity is a compile time template parameter.

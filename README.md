@@ -46,6 +46,19 @@ The pool cannot be moved, it cannot be copied. Attempting to move or copy the po
 
 All objects must be deallocated before the pool itself is destroyed if `T` has a non-trivial destructor. In debug build the pool destructor will assert if any object remains allocated within the pool.
 
+## Benchmarks
+```
+-------------------------------------------------------------------------
+Benchmark                               Time             CPU   Iterations
+-------------------------------------------------------------------------
+BM_NewDelete/100                      607 ns          607 ns      1126036
+BM_NewDelete/1000                    5806 ns         5794 ns       118682
+BM_NewDelete/10000                  59208 ns        58811 ns        12164
+BM_PoolAllocator<10'000>/100         50.7 ns         50.7 ns     13784140
+BM_PoolAllocator<10'000>/1000         462 ns          461 ns      1572115
+BM_PoolAllocator<10'000>/10000       4536 ns         4534 ns       154413
+```
+
 ## Design
 - **Stack Allocation** - the entire pool lives inline as a fixed-size array, there is no heap allocation. Capacity is a compile time template parameter.
 - **Intrusive Freelist** - free slots store a pointer to the next free slot directly inside their own memory, removing the need for a separate array. This means `create()/allocate()/deallocate()` are O(1) operations.

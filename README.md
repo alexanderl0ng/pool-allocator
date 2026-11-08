@@ -22,7 +22,7 @@ p.deallocate(d);
 ```
 
 ### Non-Trivial Types
-Use `create()` to construct non-trivially destructible types in the arena. Destructors are automatically called on `deallocate()`:
+Use `create()` to construct non-trivially destructible types in the pool. Destructors are automatically called on `deallocate()`:
 ```cpp
 struct TestStruct {
     double d;

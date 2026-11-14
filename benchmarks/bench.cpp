@@ -1,54 +1,214 @@
 #include "../pool_allocator.hpp"
+#include "order.hpp"
 
 #include <benchmark/benchmark.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <memory_resource>
+#include <new>
+#include <random>
 #include <vector>
 
-struct Widget {
-    double a;
-    int b;
-    int c;
+#ifndef NDEBUG
+#warning "NDEBUG is not defined: PoolAllocator debug checks are enabled and results will be skewed. Build with -DNDEBUG."
+#endif
+
+using lob::Order;
+
+namespace {
+
+constexpr std::size_t kPoolCapacity  = 1 << 17;
+constexpr std::size_t kNumOps        = 100'000;
+constexpr std::size_t kWarmupPasses  = 3;   // script replays before anything is timed
+constexpr std::size_t kLatencyPasses = 10;  // script replays timed op-by-op for percentiles
+
+// ---------------------------------------------------------------------------
+// Workload: a fixed random script of creates and deletes that starts and ends
+// with `resting` live orders, so it can be replayed any number of times.
+// ---------------------------------------------------------------------------
+
+struct Op {
+    bool          is_create;
+    std::uint32_t idx;
 };
 
-static void BM_NewDelete(benchmark::State& state) {
-    const std::size_t num_elements = state.range(0);
+std::vector<Op> make_script(std::size_t resting) {
+    std::mt19937 rng(42);
+    std::bernoulli_distribution coin(0.5);
 
-    std::vector<Widget*> ptrs(num_elements);
-    for (auto _ : state) {
-        for (std::size_t i{}; i < num_elements; ++i) {
-            ptrs[i] = new Widget(1.0, 2, 3);
-            benchmark::DoNotOptimize(ptrs[i]);
-        }
-        for (std::size_t i{}; i < num_elements; ++i) {
-            delete ptrs[i];
-        }
+    std::vector<Op> ops;
+    std::size_t live = resting;
+
+    auto push_create = [&] {
+        ops.push_back({true, 0});
+        ++live;
+    };
+    auto push_delete = [&] {
+        std::uniform_int_distribution<std::size_t> pick(0, live - 1);
+        ops.push_back({false, static_cast<std::uint32_t>(pick(rng))});
+        --live;
+    };
+
+    for (std::size_t i = 0; i < kNumOps; ++i) {
+        bool create = coin(rng);
+        if (live == 0)             create = true;
+        if (live == kPoolCapacity) create = false;
+        create ? push_create() : push_delete();
+    }
+    while (live > resting) push_delete();
+    while (live < resting) push_create();
+    return ops;
+}
+
+void fill_order(Order* o, std::uint64_t id) {
+    o->id_number     = id;
+    o->limit         = 10'000 + (id % 64);
+    o->entry_time    = id;
+    o->event_time    = id;
+    o->shares        = 100;
+    o->side          = (id % 2) ? lob::Side::Buy : lob::Side::Sell;
+    o->type          = lob::OrderType::Limit;
+    o->time_in_force = lob::TimeInForce::GoodTillCancel;
+}
+
+void remove_at(std::vector<Order*>& live, std::size_t idx) {
+    live[idx] = live.back();
+    live.pop_back();
+}
+
+// ---------------------------------------------------------------------------
+// Allocators under test. Each one exposes the same two functions, so a single
+// benchmark body drives all of them and the loops are guaranteed identical.
+// ---------------------------------------------------------------------------
+
+// Harness overhead only: no allocation, every "order" is the same scratch slot.
+// Subtract this row from the others to see what the allocator itself costs.
+struct Baseline {
+    Order scratch;
+
+    Order* create()         { return ::new (&scratch) Order{}; }
+    void   destroy(Order*)  {}
+};
+
+struct NewDelete {
+    Order* create()          { return new Order{}; }
+    void   destroy(Order* o) { delete o; }
+};
+
+struct Pmr {
+    std::pmr::unsynchronized_pool_resource pool;
+
+    Order* create() {
+        void* mem = pool.allocate(sizeof(Order), alignof(Order));
+        return ::new (mem) Order{};
+    }
+    void destroy(Order* o) {
+        std::destroy_at(o);
+        pool.deallocate(o, sizeof(Order), alignof(Order));
+    }
+};
+
+struct Pool {
+    std::unique_ptr<pool::PoolAllocator<Order, kPoolCapacity>> pool =
+        std::make_unique<pool::PoolAllocator<Order, kPoolCapacity>>();
+
+    Order* create()          { return pool->create(); }
+    void   destroy(Order* o) { pool->destroy(o); }
+};
+
+// ---------------------------------------------------------------------------
+// Benchmark body
+// ---------------------------------------------------------------------------
+
+template <typename Alloc>
+inline void apply(Alloc& alloc, const Op& op, std::vector<Order*>& live, std::uint64_t& id) {
+    if (op.is_create) {
+        Order* o = alloc.create();
+        fill_order(o, id++);
+        benchmark::DoNotOptimize(o);
+        live.push_back(o);
+    } else {
+        alloc.destroy(live[op.idx]);
+        remove_at(live, op.idx);
     }
 }
 
-template <std::size_t Capacity>
-static void BM_PoolAllocator(benchmark::State& state) {
-    const std::size_t num_elements = state.range(0);
-
-    pool::PoolAllocator<Widget, Capacity> p;
-    std::vector<Widget*> ptrs(num_elements);
-    for (auto _ : state) {
-        for (std::size_t i{}; i < num_elements; ++i) {
-            ptrs[i] = p.create(1.0, 2, 3);
-            benchmark::DoNotOptimize(ptrs[i]);
-        }
-        for (std::size_t i{}; i < num_elements; ++i) {
-            p.deallocate(ptrs[i]);
-        }
-    }
+void report_time_per_op(benchmark::State& state, std::size_t ops) {
+    state.counters["time/op"] = benchmark::Counter(
+        static_cast<double>(ops),
+        benchmark::Counter::kIsIterationInvariantRate | benchmark::Counter::kInvert);
 }
 
-BENCHMARK(BM_NewDelete)
-    ->Arg(100)
-    ->Arg(1'000)
-    ->Arg(10'000);
+// `samples` holds one duration in seconds per op.
+void report_percentiles(benchmark::State& state, std::vector<double>& samples) {
+    std::sort(samples.begin(), samples.end());
+    auto at = [&](double q) {
+        const auto i = static_cast<std::size_t>(q * static_cast<double>(samples.size()));
+        return samples[std::min(i, samples.size() - 1)];
+    };
+    state.counters["p50"]   = at(0.50);
+    state.counters["p99"]   = at(0.99);
+    state.counters["p99.9"] = at(0.999);
+    state.counters["max"]   = samples.back();
+}
 
-BENCHMARK_TEMPLATE(BM_PoolAllocator, 10'000)
-    ->Arg(100)
-    ->Arg(1'000)
-    ->Arg(10'000);
+template <typename Alloc>
+void BM_Churn(benchmark::State& state) {
+    const auto resting = static_cast<std::size_t>(state.range(0));
+    if (resting > kPoolCapacity) {
+        state.SkipWithError("resting exceeds kPoolCapacity");
+        return;
+    }
+
+    const std::vector<Op> script = make_script(resting);
+    Alloc alloc;
+    std::vector<Order*> live;
+    live.reserve(kPoolCapacity);
+    std::uint64_t id = 0;
+
+    for (std::size_t i = 0; i < resting; ++i) {
+        live.push_back(alloc.create());
+        fill_order(live.back(), id++);
+    }
+
+    // Warm-up: fault in pages and scramble the free list, so the timed region
+    // sees steady state rather than a freshly built, perfectly ordered heap.
+    for (std::size_t pass = 0; pass < kWarmupPasses; ++pass)
+        for (const Op& op : script) apply(alloc, op, live, id);
+
+    // 1) Mean cost per op, measured by Google Benchmark with no per-op timer.
+    for (auto _ : state)
+        for (const Op& op : script) apply(alloc, op, live, id);
+
+    // 2) Tail latency, measured separately so the timer calls do not inflate
+    //    the mean above. Every sample includes the cost of the two clock
+    //    reads; the Baseline row shows how large that floor is.
+    using Clock = std::chrono::steady_clock;
+    std::vector<double> samples;
+    samples.reserve(kLatencyPasses * script.size());
+    for (std::size_t pass = 0; pass < kLatencyPasses; ++pass) {
+        for (const Op& op : script) {
+            const auto t0 = Clock::now();
+            apply(alloc, op, live, id);
+            const auto t1 = Clock::now();
+            samples.push_back(std::chrono::duration<double>(t1 - t0).count());
+        }
+    }
+
+    for (Order* o : live) alloc.destroy(o);
+    report_time_per_op(state, script.size());
+    report_percentiles(state, samples);
+}
+
+}  // namespace
+
+BENCHMARK_TEMPLATE(BM_Churn, Baseline) ->Arg(1'000)->Arg(10'000)->Arg(100'000);
+BENCHMARK_TEMPLATE(BM_Churn, NewDelete)->Arg(1'000)->Arg(10'000)->Arg(100'000);
+BENCHMARK_TEMPLATE(BM_Churn, Pmr)      ->Arg(1'000)->Arg(10'000)->Arg(100'000);
+BENCHMARK_TEMPLATE(BM_Churn, Pool)     ->Arg(1'000)->Arg(10'000)->Arg(100'000);
 
 BENCHMARK_MAIN();

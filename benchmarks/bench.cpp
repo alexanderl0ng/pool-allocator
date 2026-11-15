@@ -23,13 +23,8 @@ namespace {
 
 constexpr std::size_t kPoolCapacity  = 1 << 17;
 constexpr std::size_t kNumOps        = 100'000;
-constexpr std::size_t kWarmupPasses  = 3;   // script replays before anything is timed
-constexpr std::size_t kLatencyPasses = 10;  // script replays timed op-by-op for percentiles
-
-// ---------------------------------------------------------------------------
-// Workload: a fixed random script of creates and deletes that starts and ends
-// with `resting` live orders, so it can be replayed any number of times.
-// ---------------------------------------------------------------------------
+constexpr std::size_t kWarmupPasses  = 3;
+constexpr std::size_t kLatencyPasses = 10;
 
 struct Op {
     bool          is_create;
@@ -80,13 +75,6 @@ void remove_at(std::vector<Order*>& live, std::size_t idx) {
     live.pop_back();
 }
 
-// ---------------------------------------------------------------------------
-// Allocators under test. Each one exposes the same two functions, so a single
-// benchmark body drives all of them and the loops are guaranteed identical.
-// ---------------------------------------------------------------------------
-
-// Harness overhead only: no allocation, every "order" is the same scratch slot.
-// Subtract this row from the others to see what the allocator itself costs.
 struct Baseline {
     Order scratch;
 
@@ -119,10 +107,6 @@ struct Pool {
     Order* create()          { return pool->create(); }
     void   destroy(Order* o) { pool->destroy(o); }
 };
-
-// ---------------------------------------------------------------------------
-// Benchmark body
-// ---------------------------------------------------------------------------
 
 template <typename Alloc>
 inline void apply(Alloc& alloc, const Op& op, std::vector<Order*>& live, std::uint64_t& id) {
@@ -175,18 +159,12 @@ void BM_Churn(benchmark::State& state) {
         fill_order(live.back(), id++);
     }
 
-    // Warm-up: fault in pages and scramble the free list, so the timed region
-    // sees steady state rather than a freshly built, perfectly ordered heap.
     for (std::size_t pass = 0; pass < kWarmupPasses; ++pass)
         for (const Op& op : script) apply(alloc, op, live, id);
 
-    // 1) Mean cost per op, measured by Google Benchmark with no per-op timer.
     for (auto _ : state)
         for (const Op& op : script) apply(alloc, op, live, id);
 
-    // 2) Tail latency, measured separately so the timer calls do not inflate
-    //    the mean above. Every sample includes the cost of the two clock
-    //    reads; the Baseline row shows how large that floor is.
     using Clock = std::chrono::steady_clock;
     std::vector<double> samples;
     samples.reserve(kLatencyPasses * script.size());
